@@ -3,6 +3,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
+use std::path::Path;
+use std::fs;
 use anyhow::Result;
 use rand::prelude::*;
 
@@ -48,8 +50,8 @@ enum Commands {
     },
     /// Execute queries on the graph
     Query {
-        /// Number of times to run the query (default: 5)
-        #[arg(long, default_value = "5")]
+        /// Number of times to run each query (default: 20)
+        #[arg(long, default_value = "20")]
         iterations: usize,
     },
 }
@@ -82,6 +84,73 @@ struct Edge {
     _from: String,
     _to: String,
     payload: String,
+}
+
+#[derive(Debug)]
+struct QueryStats {
+    query_name: String,
+    #[allow(dead_code)]
+    query_content: String,
+    runtimes: Vec<Duration>,
+    result_count: u64,
+}
+
+impl QueryStats {
+    fn new(query_name: String, query_content: String) -> Self {
+        Self {
+            query_name,
+            query_content,
+            runtimes: Vec::new(),
+            result_count: 0,
+        }
+    }
+
+    fn add_runtime(&mut self, duration: Duration, result_count: u64) {
+        self.runtimes.push(duration);
+        self.result_count = result_count; // Assuming result count is consistent across runs
+    }
+
+    fn calculate_statistics(&self) -> Option<StatsSummary> {
+        if self.runtimes.is_empty() {
+            return None;
+        }
+
+        let mut sorted_runtimes = self.runtimes.clone();
+        sorted_runtimes.sort();
+
+        let count = sorted_runtimes.len();
+        let sum: Duration = sorted_runtimes.iter().sum();
+        let average = sum / count as u32;
+        
+        let median = if count % 2 == 0 {
+            (sorted_runtimes[count / 2 - 1] + sorted_runtimes[count / 2]) / 2
+        } else {
+            sorted_runtimes[count / 2]
+        };
+
+        let percentile_90_index = ((count as f64 * 0.90).ceil() as usize).saturating_sub(1);
+        let percentile_90 = sorted_runtimes[percentile_90_index];
+
+        let min = sorted_runtimes[0];
+        let max = sorted_runtimes[count - 1];
+
+        Some(StatsSummary {
+            average,
+            median,
+            percentile_90,
+            min,
+            max,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct StatsSummary {
+    average: Duration,
+    median: Duration,
+    percentile_90: Duration,
+    min: Duration,
+    max: Duration,
 }
 
 struct ArangoClient {
@@ -214,6 +283,49 @@ fn generate_random_string(length: usize) -> String {
         .collect()
 }
 
+fn read_query_files(queries_dir: &str) -> Result<Vec<(String, String)>> {
+    let path = Path::new(queries_dir);
+    
+    if !path.exists() {
+        anyhow::bail!("Queries directory '{}' does not exist", queries_dir);
+    }
+    
+    if !path.is_dir() {
+        anyhow::bail!("Path '{}' is not a directory", queries_dir);
+    }
+    
+    let mut queries = Vec::new();
+    
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_path = entry.path();
+        
+        if let Some(extension) = file_path.extension() {
+            if extension == "aql" {
+                let file_name = file_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                
+                let content = fs::read_to_string(&file_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read file {:?}: {}", file_path, e))?;
+                
+                queries.push((file_name, content.trim().to_string()));
+            }
+        }
+    }
+    
+    if queries.is_empty() {
+        anyhow::bail!("No .aql files found in directory '{}'", queries_dir);
+    }
+    
+    // Sort queries by name for consistent output
+    queries.sort_by(|a, b| a.0.cmp(&b.0));
+    
+    Ok(queries)
+}
+
 async fn create_hop_graph(
     client: &ArangoClient,
     num_docs: usize,
@@ -343,43 +455,73 @@ async fn create_hop_graph(
     Ok(())
 }
 
-async fn run_hop_query(client: &ArangoClient, iterations: usize) -> Result<()> {
-    let query = r#"
-        FOR a IN A
-          FOR b IN 1..1 OUTBOUND a._id E
-            FOR c IN 1..1 OUTBOUND b._id F
-              LIMIT 1000
-              RETURN {a, b, c}
-    "#;
-
-    println!("Running hop query {iterations} times...");
-    println!("Query:\n{query}");
-
-    let mut total_duration = Duration::new(0, 0);
-    let mut results_count = 0;
-
-    for i in 1..=iterations {
-        print!("Iteration {i}/{iterations}: ");
-        use std::io::{self, Write};
-        io::stdout().flush().unwrap();
+async fn run_queries(client: &ArangoClient, iterations: usize) -> Result<()> {
+    let queries = read_query_files("queries")?;
+    
+    println!("Found {} query file(s) in the queries directory", queries.len());
+    println!("Running each query {iterations} times...\n");
+    
+    let mut all_stats = Vec::new();
+    
+    for (query_name, query_content) in queries {
+        println!("🔍 Executing query: {query_name}");
+        println!("Query content:\n{query_content}\n");
         
-        let (result, duration) = client.execute_aql_query(query).await?;
-        total_duration += duration;
+        let mut stats = QueryStats::new(query_name.clone(), query_content.clone());
         
-        if let Some(count) = result.get("count") {
-            results_count = count.as_u64().unwrap_or(0);
+        for i in 1..=iterations {
+            print!("  Iteration {i}/{iterations}: ");
+            use std::io::{self, Write};
+            io::stdout().flush().unwrap();
+            
+            let (result, duration) = client.execute_aql_query(&query_content).await?;
+            
+            let result_count = result.get("count")
+                .and_then(|c| c.as_u64())
+                .unwrap_or(0);
+            
+            stats.add_runtime(duration, result_count);
+            
+            println!("{}ms ({} results)", duration.as_millis(), result_count);
         }
         
-        println!("{}ms (returned {} results)", duration.as_millis(), results_count);
+        all_stats.push(stats);
+        println!(); // Empty line between queries
     }
-
-    let avg_duration = total_duration / iterations as u32;
-    println!("\nQuery Performance Summary:");
-    println!("  Total iterations: {iterations}");
-    println!("  Total time: {}ms", total_duration.as_millis());
-    println!("  Average time: {}ms", avg_duration.as_millis());
-    println!("  Results per query: {results_count}");
-
+    
+    // Print comprehensive statistics
+    println!("📊 QUERY PERFORMANCE SUMMARY");
+    println!("{}", "=".repeat(80));
+    
+    for stats in &all_stats {
+        if let Some(summary) = stats.calculate_statistics() {
+            println!("\nQuery: {}", stats.query_name);
+            println!("  Iterations: {}", stats.runtimes.len());
+            println!("  Results per query: {}", stats.result_count);
+            println!("  Average runtime: {}ms", summary.average.as_millis());
+            println!("  Median runtime: {}ms", summary.median.as_millis());
+            println!("  90th percentile: {}ms", summary.percentile_90.as_millis());
+            println!("  Min runtime: {}ms", summary.min.as_millis());
+            println!("  Max runtime: {}ms", summary.max.as_millis());
+        }
+    }
+    
+    // Overall summary if multiple queries
+    if all_stats.len() > 1 {
+        let total_queries: usize = all_stats.iter().map(|s| s.runtimes.len()).sum();
+        let total_time: Duration = all_stats.iter()
+            .flat_map(|s| &s.runtimes)
+            .sum();
+        
+        println!("\n{}", "=".repeat(80));
+        println!("OVERALL SUMMARY");
+        println!("  Total query files: {}", all_stats.len());
+        println!("  Total query executions: {total_queries}");
+        println!("  Total execution time: {}ms", total_time.as_millis());
+        println!("  Average time per execution: {}ms", 
+                 (total_time / total_queries as u32).as_millis());
+    }
+    
     Ok(())
 }
 
@@ -401,7 +543,7 @@ async fn main() -> Result<()> {
             println!("Total creation time: {}s", start.elapsed().as_secs());
         }
         Commands::Query { iterations } => {
-            run_hop_query(&client, iterations).await?;
+            run_queries(&client, iterations).await?;
         }
     }
 
