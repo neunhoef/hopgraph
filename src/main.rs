@@ -1,12 +1,12 @@
+use anyhow::Result;
 use clap::{Parser, Subcommand};
+use rand::prelude::*;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::time::{Duration, Instant};
-use std::path::Path;
+use serde_json::{Value, json};
 use std::fs;
-use anyhow::Result;
-use rand::prelude::*;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(name = "hopgraph")]
@@ -15,19 +15,19 @@ struct Cli {
     /// ArangoDB endpoint URL
     #[arg(short, long, default_value = "http://localhost:8529")]
     endpoint: String,
-    
+
     /// Username for authentication
     #[arg(short, long, default_value = "root")]
     username: String,
-    
+
     /// Password for authentication
     #[arg(short, long, default_value = "")]
     password: String,
-    
+
     /// Database name
     #[arg(short, long, default_value = "hopgraph")]
     database: String,
-    
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -39,11 +39,11 @@ enum Commands {
         /// Number of documents per collection (default: 1000000)
         #[arg(long, default_value = "1000000")]
         num_docs: usize,
-        
+
         /// Number of edges per edge collection (default: 900000)
         #[arg(long, default_value = "900000")]
         num_edges: usize,
-        
+
         /// Batch size for insertions (default: 1000)
         #[arg(long, default_value = "1000")]
         batch_size: usize,
@@ -89,7 +89,6 @@ struct Edge {
 #[derive(Debug)]
 struct QueryStats {
     query_name: String,
-    #[allow(dead_code)]
     query_content: String,
     runtimes: Vec<Duration>,
     result_count: u64,
@@ -121,7 +120,7 @@ impl QueryStats {
         let count = sorted_runtimes.len();
         let sum: Duration = sorted_runtimes.iter().sum();
         let average = sum / count as u32;
-        
+
         let median = if count % 2 == 0 {
             (sorted_runtimes[count / 2 - 1] + sorted_runtimes[count / 2]) / 2
         } else {
@@ -177,14 +176,15 @@ impl ArangoClient {
         let body = json!({
             "name": self.database
         });
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", &self.auth_header)
             .json(&body)
             .send()
             .await?;
-            
+
         if response.status().is_success() || response.status() == 409 {
             println!("Database '{}' ready", self.database);
             Ok(())
@@ -196,14 +196,15 @@ impl ArangoClient {
 
     async fn create_graph(&self, graph_def: &GraphDefinition) -> Result<()> {
         let url = format!("{}/_db/{}/_api/gharial", self.base_url, self.database);
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", &self.auth_header)
             .json(graph_def)
             .send()
             .await?;
-            
+
         if response.status().is_success() || response.status() == 409 {
             println!("Graph '{}' created successfully", graph_def.name);
             Ok(())
@@ -214,38 +215,46 @@ impl ArangoClient {
     }
 
     async fn insert_documents_batch(&self, collection: &str, documents: &[Document]) -> Result<()> {
-        let url = format!("{}/_db/{}/_api/document/{}", self.base_url, self.database, collection);
-        
-        let response = self.client
+        let url = format!(
+            "{}/_db/{}/_api/document/{}",
+            self.base_url, self.database, collection
+        );
+
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", &self.auth_header)
             .json(documents)
             .send()
             .await?;
-            
+
         if !response.status().is_success() {
             let text = response.text().await?;
             anyhow::bail!("Failed to insert documents into {}: {}", collection, text);
         }
-        
+
         Ok(())
     }
 
     async fn insert_edges_batch(&self, collection: &str, edges: &[Edge]) -> Result<()> {
-        let url = format!("{}/_db/{}/_api/document/{}", self.base_url, self.database, collection);
-        
-        let response = self.client
+        let url = format!(
+            "{}/_db/{}/_api/document/{}",
+            self.base_url, self.database, collection
+        );
+
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", &self.auth_header)
             .json(edges)
             .send()
             .await?;
-            
+
         if !response.status().is_success() {
             let text = response.text().await?;
             anyhow::bail!("Failed to insert edges into {}: {}", collection, text);
         }
-        
+
         Ok(())
     }
 
@@ -256,16 +265,17 @@ impl ArangoClient {
             "count": true,
             "batchSize": 1000
         });
-        
+
         let start = Instant::now();
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", &self.auth_header)
             .json(&body)
             .send()
             .await?;
         let duration = start.elapsed();
-            
+
         if response.status().is_success() {
             let result: Value = response.json().await?;
             Ok((result, duration))
@@ -285,21 +295,21 @@ fn generate_random_string(length: usize) -> String {
 
 fn read_query_files(queries_dir: &str) -> Result<Vec<(String, String)>> {
     let path = Path::new(queries_dir);
-    
+
     if !path.exists() {
         anyhow::bail!("Queries directory '{}' does not exist", queries_dir);
     }
-    
+
     if !path.is_dir() {
         anyhow::bail!("Path '{}' is not a directory", queries_dir);
     }
-    
+
     let mut queries = Vec::new();
-    
+
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let file_path = entry.path();
-        
+
         if let Some(extension) = file_path.extension() {
             if extension == "aql" {
                 let file_name = file_path
@@ -307,22 +317,22 @@ fn read_query_files(queries_dir: &str) -> Result<Vec<(String, String)>> {
                     .and_then(|s| s.to_str())
                     .unwrap_or("unknown")
                     .to_string();
-                
+
                 let content = fs::read_to_string(&file_path)
                     .map_err(|e| anyhow::anyhow!("Failed to read file {:?}: {}", file_path, e))?;
-                
+
                 queries.push((file_name, content.trim().to_string()));
             }
         }
     }
-    
+
     if queries.is_empty() {
         anyhow::bail!("No .aql files found in directory '{}'", queries_dir);
     }
-    
+
     // Sort queries by name for consistent output
     queries.sort_by(|a, b| a.0.cmp(&b.0));
-    
+
     Ok(queries)
 }
 
@@ -369,7 +379,7 @@ async fn create_hop_graph(
     println!("Inserting documents into vertex collections...");
     for collection in &vertex_collections {
         println!("  Inserting {num_docs} documents into {collection}");
-        
+
         for batch_start in (0..num_docs).step_by(batch_size) {
             let batch_end = (batch_start + batch_size).min(num_docs);
             let batch: Vec<Document> = (batch_start..batch_end)
@@ -378,9 +388,9 @@ async fn create_hop_graph(
                     payload: generate_random_string(100),
                 })
                 .collect();
-                
+
             client.insert_documents_batch(collection, &batch).await?;
-            
+
             if batch_start % 10000 == 0 {
                 print!("    Progress: {batch_start}/{num_docs}\r");
                 use std::io::{self, Write};
@@ -393,7 +403,7 @@ async fn create_hop_graph(
     // Insert edges for collection E (A -> B1-B9)
     println!("Inserting {num_edges} edges into collection E...");
     let mut rng = thread_rng();
-    
+
     for batch_start in (0..num_edges).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(num_edges);
         let batch: Vec<Edge> = (batch_start..batch_end)
@@ -401,7 +411,7 @@ async fn create_hop_graph(
                 let a_doc = rng.gen_range(0..num_docs);
                 let b_collection = rng.gen_range(1..=9);
                 let b_doc = rng.gen_range(0..num_docs);
-                
+
                 Edge {
                     _key: format!("edge_{i}"),
                     _from: format!("A/doc_{a_doc}"),
@@ -410,9 +420,9 @@ async fn create_hop_graph(
                 }
             })
             .collect();
-            
+
         client.insert_edges_batch("E", &batch).await?;
-        
+
         if batch_start % 10000 == 0 {
             print!("    Progress: {batch_start}/{num_edges}\r");
             use std::io::{self, Write};
@@ -423,7 +433,7 @@ async fn create_hop_graph(
 
     // Insert edges for collection F (B1-B9 -> C1-C9)
     println!("Inserting {num_edges} edges into collection F...");
-    
+
     for batch_start in (0..num_edges).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(num_edges);
         let batch: Vec<Edge> = (batch_start..batch_end)
@@ -431,7 +441,7 @@ async fn create_hop_graph(
                 let b_doc = rng.gen_range(0..num_docs);
                 let c_collection = rng.gen_range(1..=9);
                 let c_doc = rng.gen_range(0..num_docs);
-                
+
                 Edge {
                     _key: format!("edge_{i}"),
                     _from: format!("B1/doc_{b_doc}"),
@@ -440,9 +450,9 @@ async fn create_hop_graph(
                 }
             })
             .collect();
-            
+
         client.insert_edges_batch("F", &batch).await?;
-        
+
         if batch_start % 10000 == 0 {
             print!("    Progress: {batch_start}/{num_edges}\r");
             use std::io::{self, Write};
@@ -457,45 +467,47 @@ async fn create_hop_graph(
 
 async fn run_queries(client: &ArangoClient, iterations: usize) -> Result<()> {
     let queries = read_query_files("queries")?;
-    
-    println!("Found {} query file(s) in the queries directory", queries.len());
+
+    println!(
+        "Found {} query file(s) in the queries directory",
+        queries.len()
+    );
     println!("Running each query {iterations} times...\n");
-    
+
     let mut all_stats = Vec::new();
-    
+
     for (query_name, query_content) in queries {
         println!("🔍 Executing query: {query_name}");
         println!("Query content:\n{query_content}\n");
-        
+
         let mut stats = QueryStats::new(query_name.clone(), query_content.clone());
-        
+
         for i in 1..=iterations {
             print!("  Iteration {i}/{iterations}: ");
             use std::io::{self, Write};
             io::stdout().flush().unwrap();
-            
+
             let (result, duration) = client.execute_aql_query(&query_content).await?;
-            
-            let result_count = result.get("count")
-                .and_then(|c| c.as_u64())
-                .unwrap_or(0);
-            
+
+            let result_count = result.get("count").and_then(|c| c.as_u64()).unwrap_or(0);
+
             stats.add_runtime(duration, result_count);
-            
+
             println!("{}ms ({} results)", duration.as_millis(), result_count);
         }
-        
+
         all_stats.push(stats);
         println!(); // Empty line between queries
     }
-    
+
     // Print comprehensive statistics
     println!("📊 QUERY PERFORMANCE SUMMARY");
     println!("{}", "=".repeat(80));
-    
+
     for stats in &all_stats {
         if let Some(summary) = stats.calculate_statistics() {
             println!("\nQuery: {}", stats.query_name);
+            println!("  Query content:\n {}", stats.query_content);
             println!("  Iterations: {}", stats.runtimes.len());
             println!("  Results per query: {}", stats.result_count);
             println!("  Average runtime: {}ms", summary.average.as_millis());
@@ -505,39 +517,38 @@ async fn run_queries(client: &ArangoClient, iterations: usize) -> Result<()> {
             println!("  Max runtime: {}ms", summary.max.as_millis());
         }
     }
-    
+
     // Overall summary if multiple queries
     if all_stats.len() > 1 {
         let total_queries: usize = all_stats.iter().map(|s| s.runtimes.len()).sum();
-        let total_time: Duration = all_stats.iter()
-            .flat_map(|s| &s.runtimes)
-            .sum();
-        
+        let total_time: Duration = all_stats.iter().flat_map(|s| &s.runtimes).sum();
+
         println!("\n{}", "=".repeat(80));
         println!("OVERALL SUMMARY");
         println!("  Total query files: {}", all_stats.len());
         println!("  Total query executions: {total_queries}");
         println!("  Total execution time: {}ms", total_time.as_millis());
-        println!("  Average time per execution: {}ms", 
-                 (total_time / total_queries as u32).as_millis());
+        println!(
+            "  Average time per execution: {}ms",
+            (total_time / total_queries as u32).as_millis()
+        );
     }
-    
+
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    
-    let client = ArangoClient::new(
-        &cli.endpoint,
-        &cli.username,
-        &cli.password,
-        &cli.database,
-    );
+
+    let client = ArangoClient::new(&cli.endpoint, &cli.username, &cli.password, &cli.database);
 
     match cli.command {
-        Commands::Create { num_docs, num_edges, batch_size } => {
+        Commands::Create {
+            num_docs,
+            num_edges,
+            batch_size,
+        } => {
             let start = Instant::now();
             create_hop_graph(&client, num_docs, num_edges, batch_size).await?;
             println!("Total creation time: {}s", start.elapsed().as_secs());
