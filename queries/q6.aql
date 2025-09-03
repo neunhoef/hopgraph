@@ -1,0 +1,15 @@
+FOR a IN A
+  LET x = (FOR e IN E
+             FILTER e._from == a._id AND STARTS_WITH(e._to, "B1/")
+             for b IN B1
+               FILTER b._id == e._to
+               FOR f IN F
+                 FILTER f._from == b._id AND STARTS_WITH(f._to, "C1/")
+                   FOR c IN C1
+                     FILTER c._id == f._to
+                     LIMIT 1
+                     RETURN {b, c})
+  FILTER LENGTH(x) > 0
+  LIMIT 1000
+  RETURN {a, b: x[0].b, c: x[0].c}
+

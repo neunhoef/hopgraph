@@ -1,0 +1,9 @@
+FOR a IN A
+  LET x = (FOR c, e, p IN 2..2 OUTBOUND a._id E, F
+               FILTER IS_SAME_COLLECTION(p.edges[0]._to, "B1")
+               FILTER IS_SAME_COLLECTION(p.edges[1]._to, "C1")
+               LIMIT 1
+               RETURN {b : p.vertices[1], c})
+  FILTER LENGTH(x) > 0
+  LIMIT 1000
+  RETURN {a, b: x[0].b, c: x[0].c}
